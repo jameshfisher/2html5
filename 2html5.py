@@ -37,13 +37,14 @@ import html5lib
 from html5lib import treebuilders
 from lxml import etree, html
 
+
 """
 The meat of it: the algorithms
 ------------------------------
 """
 
-def uniqify(seq, idfun=None): 
-  # order preserving
+def uniqify(seq, idfun=None):
+  # Taken from http://www.peterbe.com/plog/uniqifiers-benchmark
   if idfun is None:
     def idfun(x): return x
   seen = {}
@@ -67,6 +68,7 @@ headings = {
   'h5': 2,
   'h6': 1
   }
+reverse_headings = dict((v,k) for k, v in headings.iteritems())  # http://stackoverflow.com/questions/483666/python-reverse-inverse-a-mapping
 heading_xpath = '|'.join(['//'+heading for heading in headings.keys()])
 heading_child_xpath = '|'.join(headings.keys())
 
@@ -141,6 +143,31 @@ def hgroupise(tree):
         parent.insert(start_index+1, child)
       parent.remove(hgroup)                               # and remove the hgroup.
 
+
+def hgroup_value(el):
+  """
+  Find the equivalent value of an <hgroup> compared to a stand-alone
+  <hx> element.
+  This is just equal to the value of the highest-value <hx> child element.
+  """
+  return max([headings[h.tag] for h in el.xpath(heading_child_xpath)])
+
+def heading_element_value(el):
+  if el.tag == 'hgroup':
+    return hgroup_value(el)
+  return headings[el.tag]
+
+def get_heading_elements(tree):
+  heading_elements = tree.xpath(heading_xpath)  # Get all headings.
+  
+  for i in xrange(len(heading_elements)): # Replace headings with hgroups where they are present
+    hgroups = heading_elements[i].xpath('ancestor::hgroup')
+    if len(hgroups) > 0:
+      heading_elements[i] = hgroups[0]
+  
+  return uniqify(heading_elements)  # Remove duplicates (hgroups should have more than one heading child)
+
+
 def sectionise(tree):
   """
   Surround sections of the document with <section> tags
@@ -158,22 +185,7 @@ def sectionise(tree):
   8. Go to 1.
   """
   
-  def hgroup_value(el):
-    """
-    Find the equivalent value of an <hgroup> compared to a stand-alone
-    <hx> element.
-    This is just equal to the value of the highest-value <hx> child element.
-    """
-    return max([headings[h.tag] for h in el.xpath(heading_child_xpath)])
-  
-  heading_elements = tree.xpath(heading_xpath)  # Get all headings.
-  
-  for i in xrange(len(heading_elements)): # Replace headings with hgroups where they are present
-    hgroups = heading_elements[i].xpath('ancestor::hgroup')
-    if len(hgroups) > 0:
-      heading_elements[i] = hgroups[0]
-  
-  heading_elements = uniqify(heading_elements)  # Remove duplicates (hgroups should have more than one heading child)
+  heading_elements = get_heading_elements(tree)
   
   for i in reversed(xrange(len(heading_elements))): # Remove those with <section> parents
     if heading_elements[i].getparent().tag == 'section':
@@ -209,30 +221,57 @@ def sectionise(tree):
           break
         
       section.append(following)
+
+def normalize(tree):
+  """
+  Take all headings in the tree, and normalize them.
+  This basically means "set all headings to <h1>s",
+  except for <hgroup>s where the top-level heading is set to <h1>.
+  """
+  for heading in get_heading_elements(tree):
+    if heading.tag == 'hgroup':
+      increase = 6 - heading_element_value(heading)  # Amount to increase this heading element
+      for h in heading.xpath(heading_child_xpath):
+        val = headings[h.tag]
+        h.tag = reverse_headings[val + increase]
+    else:
+      heading.tag = reverse_headings[6] # Maximum heading
     
+
 """
 Parse command-line options
 --------------------------
 """
 
-parser = OptionParser(usage="usage: %prog [options] [infile [outfile]].\n"
-                            "\n"
-                            "| I perform automated conversions to HTML5. "
-                              "I take HTML from `infile`, and do the following:\n"
-                            "|\n"
-                            "| - if `--hgroup` is specified, group sequences of headings in <hgroup> tags.\n"
-                            "| - if `--section` is specified, wrap <section> tags appropriately around headings.\n"
-                            "|\n"
-                            "| For best results, run with `--hgroup` first, then remove mistaken hgroups, then run with `--section`.\n"
-                            "|\n"
-                            "| If `--replace` is specified, I write back to the file. "
-                               "Otherwise, if `outfile` is specified, I write to that. "
-                               "Otherwise, I write to stdout.")
+usage = \
+"""usage: %prog [options] [infile [outfile]].
+
+| I perform automated conversions to HTML5.
+| I take HTML from `infile`, and do the following:
+|
+| - if `--hgroup` is specified, I group sequences of headings in <hgroup> tags.
+| - if `--section` is specified, I then wrap <section> tags appropriately around headings.
+| - if `--normalize` is specified, I finally transform all heading tags to be top-level.
+|
+| For best results:
+|  1. run with `--hgroup`
+|  2. manually:
+|     - split mistaken <hgroup>s where they've covered more than one multiple-level heading
+|     - merge <hgroup>s where elements have prevented covering multiple-level headings
+|  3. run with `--section` and `--normalize`.
+|
+| If `--replace` is specified, I write back to the file.
+| Otherwise, if `outfile` is specified, I write to that.
+| Otherwise, I write to stdout."""
+
+parser = OptionParser(usage=usage)
 
 parser.add_option('-g', '--hgroup', action="store_true",
                   help="Group headings.")
 parser.add_option('-s', '--section', action="store_true",
                   help="Group sections.")
+parser.add_option('-n', '--normalize', action="store_true",
+                  help="Normalize headings.")
 parser.add_option('-r', '--replace', action="store_true",
                   help="Replace the original file with the output. "
                        "Use with caution!")
@@ -280,6 +319,8 @@ if options.hgroup:
   hgroupise(doc)
 if options.section:
   sectionise(doc)
+if options.normalize:
+  normalize(doc)
 
 """
 Write to the output
